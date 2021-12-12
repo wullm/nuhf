@@ -2,7 +2,7 @@
 GCC = mpicc
 
 #Libraries
-INI_PARSER = #parser/minIni.o
+INI_PARSER = parser/minIni.o
 STD_LIBRARIES = -lm
 FFTW_LIBRARIES = -lfftw3 -lfftw3f -lfftw3_omp -lfftw3_mpi
 HDF5_LIBRARIES = -lhdf5
@@ -19,7 +19,13 @@ LIBRARIES = $(INI_PARSER) $(STD_LIBRARIES) $(FFTW_LIBRARIES) $(HDF5_LIBRARIES) $
 CFLAGS = -Wall -Wshadow=global -fopenmp -march=native -O4
 LDFLAGS =
 
-OBJECTS = #lib/*.o
+OBJECTS = lib/*.o
 
 all:
+	make minIni
+	mkdir -p lib
+	$(GCC) src/input.c -c -o lib/input.o $(INCLUDES) $(CFLAGS)
 	$(GCC) src/nuhf.c -o nuhf $(INCLUDES) $(OBJECTS) $(LIBRARIES) $(CFLAGS) $(LDFLAGS)
+	
+minIni:
+	cd parser && make
