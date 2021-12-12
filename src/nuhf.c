@@ -29,8 +29,8 @@ struct component {
     int level;
     int label;
     struct component *parent;
-    struct component *main_child;
-    struct component *main_leaf;
+    struct component *largest_child;
+    struct component *largest_leaf;
     int has_child;
 };
 
@@ -970,27 +970,26 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < refinement_counter; i++) {
         struct cell *c = &refinements[i];
         struct component *comp = &components[c->label];
-        comp->m += c->value;
-        comp->mx[0] += c->x[0] * (1.0 + c->value);
-        comp->mx[1] += c->x[1] * (1.0 + c->value);
-        comp->mx[2] += c->x[2] * (1.0 + c->value);
+        double mass = avg_density * (1.0 + c->value);
+        comp->m += mass;
+        comp->mx[0] += (c->x[0] + 0.5 * c->w) * mass;
+        comp->mx[1] += (c->x[1] + 0.5 * c->w) * mass;
+        comp->mx[2] += (c->x[2] + 0.5 * c->w) * mass;
         comp->level = c->level;
         comp->label = c->label;
     }
     
-    message(rank, "#ID M X Y Z lvl\n");
-    
+    /* Compute tentative centre-of-mass */
     for (int i = 1; i < total_nr_labels; i++) {
         components[i].x[0] = components[i].mx[0] / components[i].m;
         components[i].x[1] = components[i].mx[1] / components[i].m;
         components[i].x[2] = components[i].mx[2] / components[i].m;
-        
-        message(rank, "%d %g %g %g %g %d\n", i, components[i].m, components[i].x[0], components[i].x[1], components[i].x[2], components[i].level);
     }
     
     message(rank, "\n");
     
     /* Determine parent components */
+    message(rank, "Parent relationships\n");
     for (int i = 1; i < total_nr_labels; i++) {
         struct component *comp = &components[i];
         if (comp->level > 1) {
@@ -1009,6 +1008,7 @@ int main(int argc, char *argv[]) {
     message(rank, "\n");
     
     /* For each component, finds its largest child */
+    message(rank, "Main child relationships\n");
     for (int i = 1; i < total_nr_labels; i++) {
         struct component *comp = &components[i];
         double max_m = 0;
@@ -1021,7 +1021,7 @@ int main(int argc, char *argv[]) {
         }
         
         if (arg_max_m > 0) {
-            comp->main_child = &components[arg_max_m];
+            comp->largest_child = &components[arg_max_m];
             comp->has_child = 1;
             message(rank, "%d <= %d\n", comp->label, arg_max_m);
         }
@@ -1031,6 +1031,7 @@ int main(int argc, char *argv[]) {
     message(rank, "\n");
     
     /* Now, we can step down */
+    message(rank, "Sub-structure tree\n");
     for (int i = 1; i < total_nr_labels; i++) {
         struct component *comp = &components[i];
         if (comp->has_child) {
@@ -1038,11 +1039,11 @@ int main(int argc, char *argv[]) {
     
             struct component *sub = comp;
             while (sub->has_child) {
-                sub = sub->main_child;
+                sub = sub->largest_child;
                 message(rank, "%d => ", sub->label);
             }
             
-            comp->main_leaf = sub;
+            comp->largest_leaf = sub;
             message(rank, "end.\n");
         }
     }
@@ -1057,7 +1058,7 @@ int main(int argc, char *argv[]) {
     // 
     //         struct component *sub = comp;
     //         while (sub->has_child) {
-    //             sub = sub->main_child;
+    //             sub = sub->largest_child;
     //             message(rank, "%d => ", sub->label);
     //         }
     //         message(rank, "end.\n");
@@ -1069,10 +1070,15 @@ int main(int argc, char *argv[]) {
     for (int i = 1; i < total_nr_labels; i++) {
         struct component *comp = &components[i];
         if (!comp->has_child) {
-            int host_label = comp->parent->main_leaf->label;
+            int host_label = comp->parent->largest_leaf->label;
             message(rank, "%d %g %g %g %g %d %d\n", i, comp->m, comp->x[0], comp->x[1], comp->x[2], host_label, comp->level);
         }
     }
+    
+    
+    
+    
+    
     
     free(components);
     
@@ -1100,54 +1106,7 @@ int main(int argc, char *argv[]) {
     //     }
     // 
     // }
-    
-    
-    
-    
-    
-    exit(1);
-    
-    
-    /* Can we do neighbour finding? */
-    // domain[row_major(x, y, z, N)]
-    struct cell *c = &refinements[3];
-    struct cell *n;
-    int has = has_neighbour(c, &n, -1, 0, 0, N, domain);
-    
-    printf("Neuighbour? %d\n", has);
-    printf("%d %d %d %d\n", c->rel_x[0], c->rel_x[1], c->rel_x[2], c->level);
-    if (has)
-    printf("%d %d %d %d\n", n->rel_x[0], n->rel_x[1], n->rel_x[2], n->level);
-    
-    
-    struct cell *c2;
-    int ex = cell_exists(1, 1.5, 3.5, 3.5, DomainRes, N, 1, &c2, domain, refinements);
-    printf("exists? %d\n", ex);
-    printf("exists? %g %g %g\n", c2->x[0], c2->x[1], c2->x[2]);
-    
-    
-    double X = 7.7;
-    double Y = 3.0;
-    double Z = 3.0;
-    int ix = X / (DomainRes / 2);
-    int iy = Y / (DomainRes / 2);
-    int iz = Z / (DomainRes / 2);
-    
-    struct cell *tc;
-    find_top_cell(1, ix, iy, iz, &tc, N, domain);
-    printf("found %g %g %g %d\n", tc->x[0], tc->x[1], tc->x[2], tc->level);
-    int found = find_cell(1, ix, iy, iz, &tc);
-    
-    printf("found %d %d %d %d\n", found, ix, iy, iz);
-    printf("found %d %g %g %g %d\n", found, tc->x[0], tc->x[1], tc->x[2], tc->level);
-    
-    
-    /* Deposit some particles */
-    double mass = 1.0;
-    deposit_tsc(mass, X, Y, Z, 1, domain, N, DomainRes);
-    
-    
-    
+        
     
     free(refinements);
     free(domain);
