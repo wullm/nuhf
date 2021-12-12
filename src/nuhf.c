@@ -474,13 +474,11 @@ int main(int argc, char *argv[]) {
                 domain[row_major(x, y, z, N)].rel_x[1] = y;
                 domain[row_major(x, y, z, N)].rel_x[2] = z;
                 domain[row_major(x, y, z, N)].value = 0.0;
-                
-                // printf ("%g %g %g\n", domain[row_major(x, y, z, N)].x[0], domain[row_major(x, y, z, N)].x[1], domain[row_major(x, y, z, N)].x[2]);
             }
         }
     }
     
-    printf("=====\n");
+    message(rank, "Creating coarse-grained density grid.\n");
     
     for (int k=rank; k<slabs+1; k+=MPI_Rank_Count) {
         /* All slabs have the same number of particles, except possibly the last */
@@ -618,14 +616,15 @@ int main(int argc, char *argv[]) {
     for (int i=0; i<N*N*N; i++) {
         box[i] = domain[i].value;
     }
-    writeFieldFile(box, N, BoxLen, "density.hdf5");
+    char coarse_grid_fname[50];
+    sprintf(coarse_grid_fname, "%s", "density_0.hdf5");
+    writeFieldFile(box, N, BoxLen, coarse_grid_fname);
+    message(rank, "Coarse-grained grid exported to '%s'.\n", coarse_grid_fname);
     free(box);
     
-    printf("=====\n");
-    printf("Doing the first refinement.\n");
-    printf("=====\n");
+    message(rank, "Doing the first refinement.\n");
     
-    const double density_criterion = 500;
+    const double density_criterion = 200;
     const double density_criterion2 = density_criterion;
     
     int refinement_memory = 10 * N * N * N;
@@ -641,292 +640,166 @@ int main(int argc, char *argv[]) {
                 int refine = domain[row_major(x, y, z, N)].value > density_criterion;
                 
                 if (refine) {
-                    printf("Refining %d %d %d\n", x, y, z);
-                    
                     refine_cell(&domain[row_major(x, y, z, N)], refinements, &refinement_counter, refinement_memory);
                 }
             }
         }
     }
     
-    /* Do mass assignment on the refined level */
-    counter = 0;
-    for (int k=rank; k<slabs+1; k+=MPI_Rank_Count) {
-        /* All slabs have the same number of particles, except possibly the last */
-        hid_t slab_size = fmin(Npart - k * max_slab_size, max_slab_size);
-        counter += slab_size; //the number of particles read
-
-        /* Define the hyperslab */
-        hsize_t slab_dims[2], start[2]; //for 3-vectors
-        hsize_t slab_dims_one[1], start_one[1]; //for scalars
-
-        /* Slab dimensions for 3-vectors */
-        slab_dims[0] = slab_size;
-        slab_dims[1] = 3; //(x,y,z)
-        start[0] = k * max_slab_size;
-        start[1] = 0; //start with x
-
-        /* Slab dimensions for scalars */
-        slab_dims_one[0] = slab_size;
-        start_one[0] = k * max_slab_size;
-
-        /* Open the coordinates dataset */
-        h_dat = H5Dopen(h_grp, "Coordinates", H5P_DEFAULT);
-
-        /* Find the dataspace (in the file) */
-        h_space = H5Dget_space (h_dat);
-
-        /* Select the hyperslab */
-        hid_t status = H5Sselect_hyperslab(h_space, H5S_SELECT_SET, start,
-                                           NULL, slab_dims, NULL);
-        assert(status >= 0);
-
-        /* Create a memory space */
-        hid_t h_mems = H5Screate_simple(2, slab_dims, NULL);
-
-        /* Create the data array */
-        double data[slab_size][3];
-
-        status = H5Dread(h_dat, H5T_NATIVE_DOUBLE, h_mems, h_space, H5P_DEFAULT,
-                         data);
-
-        /* Close the memory space */
-        H5Sclose(h_mems);
-
-        /* Close the data and memory spaces */
-        H5Sclose(h_space);
-
-        /* Close the dataset */
-        H5Dclose(h_dat);
-
-
-        /* Open the masses dataset */
-        h_dat = H5Dopen(h_grp, "Masses", H5P_DEFAULT);
-
-        /* Find the dataspace (in the file) */
-        h_space = H5Dget_space (h_dat);
-
-        /* Select the hyperslab */
-        status = H5Sselect_hyperslab(h_space, H5S_SELECT_SET, start_one, NULL,
-                                            slab_dims_one, NULL);
-
-        /* Create a memory space */
-        h_mems = H5Screate_simple(1, slab_dims_one, NULL);
-
-        /* Create the data array */
-        double mass_data[slab_size];
-
-        status = H5Dread(h_dat, H5T_NATIVE_DOUBLE, h_mems, h_space, H5P_DEFAULT,
-                         mass_data);
-
-        /* Close the memory space */
-        H5Sclose(h_mems);
-
-        /* Close the data and memory spaces */
-        H5Sclose(h_space);
-
-        /* Close the dataset */
-        H5Dclose(h_dat);
-
-        /* Assign the particles to the grid with CIC */
-        for (int l=0; l<slab_size; l++) {
-            double X = data[l][0];
-            double Y = data[l][1];
-            double Z = data[l][2];
-            double M = mass_data[l];
-            
-            deposit_tsc(M, X, Y, Z, 1, domain, N, DomainRes);
-        }
-
-        printf("(%03d,%03d) Read %ld particles\n", rank, k, slab_size);
-        slab_counter++;
-    }
     
+    for (int level = 1; level < 6; level++) {
+        message(rank, "Re-computing density on level %d.\n", level);
     
-    printf("=====\n");
-    
-    /* Turn it into an overdensity grid */
-    double refined_avg_density = total_mass / (BoxLen * BoxLen * BoxLen) / 8;
-    
-    for (int i = 0; i < refinement_counter; i++) {
-        refinements[i].value = (refinements[i].value - refined_avg_density) / refined_avg_density;
-    }
-    
-    printf("Avg density %g %g\n", avg_density, refined_avg_density);
-        
-    box = calloc(sizeof(double), 8 * N * N * N);
-    for (int i = 0; i < refinement_counter; i++) {
-        struct cell *c = &refinements[i];
-        int x = c->x[0] / c->w;
-        int y = c->x[1] / c->w;
-        int z = c->x[2] / c->w;
-        int level = c->level;
-        int scale = 2 << (level - 1);
-        int xyz = row_major(x, y, z, N * scale);
-        
-        box[xyz] = c->value;
-    }
-    writeFieldFile(box, 2*N, BoxLen, "density2.hdf5");
-    free(box);    
-    
-    printf("=====\n");
-    printf("Doing the second refinement.\n");
-    printf("=====\n");
-    
-    /* Further refinement? */
-    for (int i = 0; i < refinement_counter; i++) {
-        /* Refine? */
-        int refine = refinements[i].value > density_criterion2 * 8;
-            
-        if (refine) {
-            printf("Refining %g %g %g %g\n", refinements[i].x[0], refinements[i].x[1], refinements[i].x[2], refinements[i].value);
-            
-            refine_cell(&refinements[i], refinements, &refinement_counter, refinement_memory);
-        }
-    }
-    
-    /* Do mass assignment on the refined level */
-    counter = 0;
-    for (int k=rank; k<slabs+1; k+=MPI_Rank_Count) {
-        /* All slabs have the same number of particles, except possibly the last */
-        hid_t slab_size = fmin(Npart - k * max_slab_size, max_slab_size);
-        counter += slab_size; //the number of particles read
+        /* Do mass assignment on the refined level */
+        counter = 0;
+        for (int k=rank; k<slabs+1; k+=MPI_Rank_Count) {
+            /* All slabs have the same number of particles, except possibly the last */
+            hid_t slab_size = fmin(Npart - k * max_slab_size, max_slab_size);
+            counter += slab_size; //the number of particles read
 
-        /* Define the hyperslab */
-        hsize_t slab_dims[2], start[2]; //for 3-vectors
-        hsize_t slab_dims_one[1], start_one[1]; //for scalars
+            /* Define the hyperslab */
+            hsize_t slab_dims[2], start[2]; //for 3-vectors
+            hsize_t slab_dims_one[1], start_one[1]; //for scalars
 
-        /* Slab dimensions for 3-vectors */
-        slab_dims[0] = slab_size;
-        slab_dims[1] = 3; //(x,y,z)
-        start[0] = k * max_slab_size;
-        start[1] = 0; //start with x
+            /* Slab dimensions for 3-vectors */
+            slab_dims[0] = slab_size;
+            slab_dims[1] = 3; //(x,y,z)
+            start[0] = k * max_slab_size;
+            start[1] = 0; //start with x
 
-        /* Slab dimensions for scalars */
-        slab_dims_one[0] = slab_size;
-        start_one[0] = k * max_slab_size;
+            /* Slab dimensions for scalars */
+            slab_dims_one[0] = slab_size;
+            start_one[0] = k * max_slab_size;
 
-        /* Open the coordinates dataset */
-        h_dat = H5Dopen(h_grp, "Coordinates", H5P_DEFAULT);
+            /* Open the coordinates dataset */
+            h_dat = H5Dopen(h_grp, "Coordinates", H5P_DEFAULT);
 
-        /* Find the dataspace (in the file) */
-        h_space = H5Dget_space (h_dat);
+            /* Find the dataspace (in the file) */
+            h_space = H5Dget_space (h_dat);
 
-        /* Select the hyperslab */
-        hid_t status = H5Sselect_hyperslab(h_space, H5S_SELECT_SET, start,
-                                           NULL, slab_dims, NULL);
-        assert(status >= 0);
+            /* Select the hyperslab */
+            hid_t status = H5Sselect_hyperslab(h_space, H5S_SELECT_SET, start,
+                                               NULL, slab_dims, NULL);
+            assert(status >= 0);
 
-        /* Create a memory space */
-        hid_t h_mems = H5Screate_simple(2, slab_dims, NULL);
+            /* Create a memory space */
+            hid_t h_mems = H5Screate_simple(2, slab_dims, NULL);
 
-        /* Create the data array */
-        double data[slab_size][3];
+            /* Create the data array */
+            double data[slab_size][3];
 
-        status = H5Dread(h_dat, H5T_NATIVE_DOUBLE, h_mems, h_space, H5P_DEFAULT,
-                         data);
+            status = H5Dread(h_dat, H5T_NATIVE_DOUBLE, h_mems, h_space, H5P_DEFAULT,
+                             data);
 
-        /* Close the memory space */
-        H5Sclose(h_mems);
+            /* Close the memory space */
+            H5Sclose(h_mems);
 
-        /* Close the data and memory spaces */
-        H5Sclose(h_space);
+            /* Close the data and memory spaces */
+            H5Sclose(h_space);
 
-        /* Close the dataset */
-        H5Dclose(h_dat);
+            /* Close the dataset */
+            H5Dclose(h_dat);
 
 
-        /* Open the masses dataset */
-        h_dat = H5Dopen(h_grp, "Masses", H5P_DEFAULT);
+            /* Open the masses dataset */
+            h_dat = H5Dopen(h_grp, "Masses", H5P_DEFAULT);
 
-        /* Find the dataspace (in the file) */
-        h_space = H5Dget_space (h_dat);
+            /* Find the dataspace (in the file) */
+            h_space = H5Dget_space (h_dat);
 
-        /* Select the hyperslab */
-        status = H5Sselect_hyperslab(h_space, H5S_SELECT_SET, start_one, NULL,
-                                            slab_dims_one, NULL);
+            /* Select the hyperslab */
+            status = H5Sselect_hyperslab(h_space, H5S_SELECT_SET, start_one, NULL,
+                                                slab_dims_one, NULL);
 
-        /* Create a memory space */
-        h_mems = H5Screate_simple(1, slab_dims_one, NULL);
+            /* Create a memory space */
+            h_mems = H5Screate_simple(1, slab_dims_one, NULL);
 
-        /* Create the data array */
-        double mass_data[slab_size];
+            /* Create the data array */
+            double mass_data[slab_size];
 
-        status = H5Dread(h_dat, H5T_NATIVE_DOUBLE, h_mems, h_space, H5P_DEFAULT,
-                         mass_data);
+            status = H5Dread(h_dat, H5T_NATIVE_DOUBLE, h_mems, h_space, H5P_DEFAULT,
+                             mass_data);
 
-        /* Close the memory space */
-        H5Sclose(h_mems);
+            /* Close the memory space */
+            H5Sclose(h_mems);
 
-        /* Close the data and memory spaces */
-        H5Sclose(h_space);
+            /* Close the data and memory spaces */
+            H5Sclose(h_space);
 
-        /* Close the dataset */
-        H5Dclose(h_dat);
+            /* Close the dataset */
+            H5Dclose(h_dat);
 
-        /* Assign the particles to the grid with CIC */
-        for (int l=0; l<slab_size; l++) {
-            double X = data[l][0];
-            double Y = data[l][1];
-            double Z = data[l][2];
-            double M = mass_data[l];
-            
-            deposit_tsc(M, X, Y, Z, 2, domain, N, DomainRes);
-        }
-
-        printf("(%03d,%03d) Read %ld particles\n", rank, k, slab_size);
-        slab_counter++;
-    }
-    
-    
-    printf("=====\n");
-    
-    /* Turn it into an overdensity grid */
-    double refined_avg_density2 = total_mass / (BoxLen * BoxLen * BoxLen) / 64;
-    
-    for (int i = 0; i < refinement_counter; i++) {
-        if (refinements[i].level == 2) {
-            refinements[i].value = (refinements[i].value - refined_avg_density2) / refined_avg_density2;
-        }
-    }
-    
-    printf("Avg density %g %g %g\n", avg_density, refined_avg_density, refined_avg_density2);
-        
-    box = calloc(sizeof(double), 64 * N * N * N);
-    for (int i = 0; i < refinement_counter; i++) {
-        if (refinements[i].level == 2) {
-            struct cell *c = &refinements[i];
-            int x = c->x[0] / c->w;
-            int y = c->x[1] / c->w;
-            int z = c->x[2] / c->w;
-            int level = c->level;
-            int scale = 2 << (level - 1);
-            int xyz = row_major(x, y, z, N * scale);
-            
-            box[xyz] = c->value;
-        }
-    }
-    writeFieldFile(box, 4*N, BoxLen, "density3.hdf5");
-    free(box);    
-    
-    printf("=====\n");
-    printf("Doing the third refinement.\n");
-    printf("=====\n");
-    
-    
-    /* Further refinement? */
-    for (int i = 0; i < refinement_counter; i++) {
-        if (refinements[i].level == 2) {
-            /* Refine? */
-            int refine = refinements[i].value > density_criterion2 * 64;
+            /* Assign the particles to the grid with CIC */
+            for (int l=0; l<slab_size; l++) {
+                double X = data[l][0];
+                double Y = data[l][1];
+                double Z = data[l][2];
+                double M = mass_data[l];
                 
-            if (refine) {
-                printf("Refining %g %g %g %g\n", refinements[i].x[0], refinements[i].x[1], refinements[i].x[2], refinements[i].value);
-                
-                refine_cell(&refinements[i], refinements, &refinement_counter, refinement_memory);
+                deposit_tsc(M, X, Y, Z, level, domain, N, DomainRes);
+            }
+
+            printf("(%03d,%03d) Read %ld particles\n", rank, k, slab_size);
+            slab_counter++;
+        }
+        
+        /* Turn it into an overdensity grid */        
+        double max_density = 0;
+        for (int i = 0; i < refinement_counter; i++) {
+            if (refinements[i].level == level) {
+                refinements[i].value = (refinements[i].value - avg_density) / avg_density;
+                if (refinements[i].value > max_density) {
+                    max_density = refinements[i].value;
+                }
             }
         }
+        message(rank, "Maximum density: %g\n", max_density);
+    
+        long long grid_size = (2 << (level - 1)) * N;
+        if (grid_size < 256) {        
+            box = calloc(sizeof(double), grid_size * grid_size * grid_size);
+            for (int i = 0; i < refinement_counter; i++) {
+                struct cell *c = &refinements[i];
+                if (c->level == level) {
+                    int x = c->x[0] / c->w;
+                    int y = c->x[1] / c->w;
+                    int z = c->x[2] / c->w;
+                    int scale = 2 << (c->level - 1);
+                    int xyz = row_major(x, y, z, N * scale);
+                    box[xyz] = c->value;
+                }
+            }
+            char grid_fname[50];
+            sprintf(grid_fname, "density_%d.hdf5", level);
+            writeFieldFile(box, grid_size, BoxLen, grid_fname);
+            message(rank, "Level %d grid exported to '%s'.\n", level, grid_fname);
+            free(box);    
+        }
+    
+        message(rank, "Doing level %d refinement (threshold %g).\n", level, density_criterion2 * (2 << (3*(level - 1))));
+
+        /* Further refinement? */
+        long long new_refinements = 0;
+        for (int i = 0; i < refinement_counter; i++) {
+            if (refinements[i].level == level) {
+                /* Refine? */
+                int refine = refinements[i].value > density_criterion2 * (2 << (3*(level - 1)));
+                    
+                if (refine) {
+                    // printf("Refining %g %g %g %g\n", refinements[i].x[0], refinements[i].x[1], refinements[i].x[2], refinements[i].value);        
+                    refine_cell(&refinements[i], refinements, &refinement_counter, refinement_memory);
+                    new_refinements++;
+                }
+            }
+        }
+        
+        message(rank, "New refinements: %lld\n", new_refinements);
+        if (new_refinements == 0) {
+            break;
+        }
     }
+    
+    
     
     exit(1);
     
