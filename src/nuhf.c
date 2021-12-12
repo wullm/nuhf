@@ -32,6 +32,9 @@ struct component {
     struct component *largest_child;
     struct component *largest_leaf;
     int has_child;
+    
+    long long npart;
+    double mass_tot;
 };
 
 #define wrap(i,N) ((i)%(N)+(N))%(N)
@@ -956,16 +959,16 @@ int main(int argc, char *argv[]) {
     }
     
     /* For each connected structure, compute basic properties */
-    struct component *components = malloc(sizeof(struct component) * (total_nr_labels + 1));
+    struct component *components = calloc(sizeof(struct component), (total_nr_labels + 1));
     
-    for (int i = 1; i < total_nr_labels; i++) {
-        components[i].m = 0.0;
-        components[i].mx[0] = 0.0;
-        components[i].mx[1] = 0.0;
-        components[i].mx[2] = 0.0;
-        components[i].label = 0;
-        components[i].has_child = 0;
-    }
+    // for (int i = 1; i < total_nr_labels; i++) {
+    //     components[i].m = 0.0;
+    //     components[i].mx[0] = 0.0;
+    //     components[i].mx[1] = 0.0;
+    //     components[i].mx[2] = 0.0;
+    //     components[i].label = 0;
+    //     components[i].has_child = 0;
+    // }
     
     for (int i = 0; i < refinement_counter; i++) {
         struct cell *c = &refinements[i];
@@ -1076,7 +1079,119 @@ int main(int argc, char *argv[]) {
     }
     
     
-    
+    // /* Now, assign particles */
+    // for (level = 2; level < 5; level++) {
+    //     message(rank, "Assigning particles on level %d.\n", level);
+    // 
+    //     /* Do mass assignment on the refined level */
+    //     counter = 0;
+    //     for (int k=rank; k<slabs+1; k+=MPI_Rank_Count) {
+    //         /* All slabs have the same number of particles, except possibly the last */
+    //         hid_t slab_size = fmin(Npart - k * max_slab_size, max_slab_size);
+    //         counter += slab_size; //the number of particles read
+    // 
+    //         /* Define the hyperslab */
+    //         hsize_t slab_dims[2], start[2]; //for 3-vectors
+    //         hsize_t slab_dims_one[1], start_one[1]; //for scalars
+    // 
+    //         /* Slab dimensions for 3-vectors */
+    //         slab_dims[0] = slab_size;
+    //         slab_dims[1] = 3; //(x,y,z)
+    //         start[0] = k * max_slab_size;
+    //         start[1] = 0; //start with x
+    // 
+    //         /* Slab dimensions for scalars */
+    //         slab_dims_one[0] = slab_size;
+    //         start_one[0] = k * max_slab_size;
+    // 
+    //         /* Open the coordinates dataset */
+    //         h_dat = H5Dopen(h_grp, "Coordinates", H5P_DEFAULT);
+    // 
+    //         /* Find the dataspace (in the file) */
+    //         h_space = H5Dget_space (h_dat);
+    // 
+    //         /* Select the hyperslab */
+    //         hid_t status = H5Sselect_hyperslab(h_space, H5S_SELECT_SET, start,
+    //                                            NULL, slab_dims, NULL);
+    //         assert(status >= 0);
+    // 
+    //         /* Create a memory space */
+    //         hid_t h_mems = H5Screate_simple(2, slab_dims, NULL);
+    // 
+    //         /* Create the data array */
+    //         double data[slab_size][3];
+    // 
+    //         status = H5Dread(h_dat, H5T_NATIVE_DOUBLE, h_mems, h_space, H5P_DEFAULT,
+    //                          data);
+    // 
+    //         /* Close the memory space */
+    //         H5Sclose(h_mems);
+    // 
+    //         /* Close the data and memory spaces */
+    //         H5Sclose(h_space);
+    // 
+    //         /* Close the dataset */
+    //         H5Dclose(h_dat);
+    // 
+    // 
+    //         /* Open the masses dataset */
+    //         h_dat = H5Dopen(h_grp, "Masses", H5P_DEFAULT);
+    // 
+    //         /* Find the dataspace (in the file) */
+    //         h_space = H5Dget_space (h_dat);
+    // 
+    //         /* Select the hyperslab */
+    //         status = H5Sselect_hyperslab(h_space, H5S_SELECT_SET, start_one, NULL,
+    //                                             slab_dims_one, NULL);
+    // 
+    //         /* Create a memory space */
+    //         h_mems = H5Screate_simple(1, slab_dims_one, NULL);
+    // 
+    //         /* Create the data array */
+    //         double mass_data[slab_size];
+    // 
+    //         status = H5Dread(h_dat, H5T_NATIVE_DOUBLE, h_mems, h_space, H5P_DEFAULT,
+    //                          mass_data);
+    // 
+    //         /* Close the memory space */
+    //         H5Sclose(h_mems);
+    // 
+    //         /* Close the data and memory spaces */
+    //         H5Sclose(h_space);
+    // 
+    //         /* Close the dataset */
+    //         H5Dclose(h_dat);
+    // 
+    //         /* Assign the particles to the grid with CIC */
+    //         for (int l=0; l<slab_size; l++) {
+    //             double M = mass_data[l];
+    // 
+    //             int scale = 2 << (level - 1);
+    //             double res = DomainRes / scale;
+    //             double inv_res = 1.0 / res;
+    //             double X = data[l][0] * inv_res;
+    //             double Y = data[l][1] * inv_res;
+    //             double Z = data[l][2] * inv_res;
+    //             int iX = (int) floor(X);
+    //             int iY = (int) floor(Y);
+    //             int iZ = (int) floor(Z);
+    // 
+    //             /* Find the cell in the refined grid (if it exists) */
+    //             struct cell *c;
+    //             find_top_cell(level, iX, iY, iZ, &c, N, domain);
+    //             int exists = find_cell(level, iX, iY, iZ, &c);
+    //             if (exists) {
+    //                 components[c->label].npart++;
+    //                 components[c->label].mass_tot += M;
+    //             }
+    //         }
+    // 
+    //         printf("(%03d,%03d) Read %ld particles\n", rank, k, slab_size);
+    //         slab_counter++;
+    //     }
+    // }
+    // 
+
     
     
     
