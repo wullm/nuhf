@@ -22,6 +22,18 @@ struct cell {
     int label;
 };
 
+struct component {
+    double x[3];
+    double m;
+    double mx[3];
+    int level;
+    int label;
+    struct component *parent;
+    struct component *main_child;
+    struct component *main_leaf;
+    int has_child;
+};
+
 #define wrap(i,N) ((i)%(N)+(N))%(N)
 #define fwrap(x,L) fmod(fmod((x),(L))+(L),(L))
 
@@ -806,6 +818,8 @@ int main(int argc, char *argv[]) {
     message(rank, "The highest level is %d (grid = %d)\n", level, (2 << (level - 1)) * N);
     message(rank, "\n");
     
+    int total_nr_labels = 0;
+    
     for (level = 1; level < 6; level++) {
         message(rank, "Doing a connected component search on level %d.\n", level);
         
@@ -896,6 +910,8 @@ int main(int argc, char *argv[]) {
             }
         }
         
+        
+        
         // printf("===\n");
         // 
         // for (int i = 0; i < end - begin; i++) {
@@ -904,6 +920,13 @@ int main(int argc, char *argv[]) {
         // }
         
         message(rank, "We have %d structures on level %d\n", largest_label, level);
+        
+        /* Update the labels, so that they are globally unique over all levels */
+        for (int i = begin; i < end; i++) {
+            struct cell *c = &refinements[i];
+            c->label += total_nr_labels;
+        }
+        total_nr_labels += largest_label;
         
         long long grid_size = (2 << (level - 1)) * N;
         if (grid_size < 256) {        
@@ -931,6 +954,153 @@ int main(int argc, char *argv[]) {
         
         printf("===\n");
     }
+    
+    /* For each connected structure, compute basic properties */
+    struct component *components = malloc(sizeof(struct component) * (total_nr_labels + 1));
+    
+    for (int i = 1; i < total_nr_labels; i++) {
+        components[i].m = 0.0;
+        components[i].mx[0] = 0.0;
+        components[i].mx[1] = 0.0;
+        components[i].mx[2] = 0.0;
+        components[i].label = 0;
+        components[i].has_child = 0;
+    }
+    
+    for (int i = 0; i < refinement_counter; i++) {
+        struct cell *c = &refinements[i];
+        struct component *comp = &components[c->label];
+        comp->m += c->value;
+        comp->mx[0] += c->x[0] * (1.0 + c->value);
+        comp->mx[1] += c->x[1] * (1.0 + c->value);
+        comp->mx[2] += c->x[2] * (1.0 + c->value);
+        comp->level = c->level;
+        comp->label = c->label;
+    }
+    
+    message(rank, "#ID M X Y Z lvl\n");
+    
+    for (int i = 1; i < total_nr_labels; i++) {
+        components[i].x[0] = components[i].mx[0] / components[i].m;
+        components[i].x[1] = components[i].mx[1] / components[i].m;
+        components[i].x[2] = components[i].mx[2] / components[i].m;
+        
+        message(rank, "%d %g %g %g %g %d\n", i, components[i].m, components[i].x[0], components[i].x[1], components[i].x[2], components[i].level);
+    }
+    
+    message(rank, "\n");
+    
+    /* Determine parent components */
+    for (int i = 1; i < total_nr_labels; i++) {
+        struct component *comp = &components[i];
+        if (comp->level > 1) {
+            for (int j = 0; j < refinement_counter; j++) {
+                struct cell *c = &refinements[j];
+                if (c->label == comp->label) {
+                    comp->parent = &components[c->parent->label];
+                    break;
+                }
+            }
+        
+            message(rank, "%d => %d\n", comp->parent->label, comp->label);
+        }
+    }
+    
+    message(rank, "\n");
+    
+    /* For each component, finds its largest child */
+    for (int i = 1; i < total_nr_labels; i++) {
+        struct component *comp = &components[i];
+        double max_m = 0;
+        int arg_max_m = 0;
+        for (int j = i + 1; j < total_nr_labels; j++) {
+            struct component *comp2 = &components[j];
+            if (comp2->level > 1 && comp2->m > max_m && comp2->parent->label == comp->label) {
+                arg_max_m = comp2->label;
+            }
+        }
+        
+        if (arg_max_m > 0) {
+            comp->main_child = &components[arg_max_m];
+            comp->has_child = 1;
+            message(rank, "%d <= %d\n", comp->label, arg_max_m);
+        }
+        
+    }
+    
+    message(rank, "\n");
+    
+    /* Now, we can step down */
+    for (int i = 1; i < total_nr_labels; i++) {
+        struct component *comp = &components[i];
+        if (comp->has_child) {
+            message(rank, "%d => ", comp->label);
+    
+            struct component *sub = comp;
+            while (sub->has_child) {
+                sub = sub->main_child;
+                message(rank, "%d => ", sub->label);
+            }
+            
+            comp->main_leaf = sub;
+            message(rank, "end.\n");
+        }
+    }
+    
+    message(rank, "\n");
+    
+    // /* Now, we can step down */
+    // for (int i = 1; i < total_nr_labels; i++) {
+    //     struct component *comp = &components[i];
+    //     if (comp->level == 1) {
+    //         message(rank, "%d => ", comp->label);
+    // 
+    //         struct component *sub = comp;
+    //         while (sub->has_child) {
+    //             sub = sub->main_child;
+    //             message(rank, "%d => ", sub->label);
+    //         }
+    //         message(rank, "end.\n");
+    //     }
+    // }
+    
+    /* Find the leafs of the tree, which correspond to (sub)-halos */
+    message(rank, "#ID M X Y Z parent refinement_lvl\n");
+    for (int i = 1; i < total_nr_labels; i++) {
+        struct component *comp = &components[i];
+        if (!comp->has_child) {
+            int host_label = comp->parent->main_leaf->label;
+            message(rank, "%d %g %g %g %g %d %d\n", i, comp->m, comp->x[0], comp->x[1], comp->x[2], host_label, comp->level);
+        }
+    }
+    
+    free(components);
+    
+    // {
+    //     int level = 4;
+    // 
+    //     // /* Find the first index of this level */
+    //     // int begin = 0;
+    //     // int end = 0;
+    //     // for (int i = 0; i < refinement_counter; i++) {
+    //     //     if (refinements[i].level < level) {
+    //     //         begin++;
+    //     //     }
+    //     //     if (refinements[i].level <= level) {
+    //     //         end++;
+    //     //     }
+    //     // }
+    //     // 
+    //     // message(rank, "First index is (%d, %d) %d\n", begin, end, refinement_counter);
+    // 
+    //     for (int i = 0; i < refinement_counter; i++) {
+    //         if (refinements[i].level == level) {
+    //             message(rank, "(%d, %d) (%d, %d) (%d, %d) (%d, %d)\n", refinements[i].level, refinements[i].label, refinements[i].parent->level, refinements[i].parent->label, refinements[i].parent->parent->level, refinements[i].parent->parent->label, refinements[i].parent->parent->parent->level, refinements[i].parent->parent->parent->label);
+    //         }
+    //     }
+    // 
+    // }
+    
     
     
     
