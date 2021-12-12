@@ -12,6 +12,8 @@ struct cell {
     struct cell *children[8];
     struct cell *parent;
     
+    double value;
+    
     int label;
 };
 
@@ -136,6 +138,7 @@ void refine_cell(struct cell *c, struct cell *refinements, int *refinement_count
                 refinements[*refinement_counter].rel_x[0] = i;
                 refinements[*refinement_counter].rel_x[1] = j;
                 refinements[*refinement_counter].rel_x[2] = k;
+                refinements[*refinement_counter].value = 0.0;
                 
                 c->children[row_major(i, j, k, 2)] = &refinements[*refinement_counter];
                 *refinement_counter = *refinement_counter + 1;
@@ -221,11 +224,60 @@ int find_cell(int level, int x, int y, int z, struct cell **c) {
         int ry = 2 * hy;
         int rz = 2 * hz;
         *c = (*c)->children[row_major(rx, ry, rz, 2)];
-        find_cell(level, x, y, z, c);
+        return find_cell(level, x, y, z, c);
     }
-    return 0;
 }
 
+void deposit_tsc(double value, double x, double y, double z, int level, struct cell *domain, int N, double DomainRes) {
+    int scale = 2 << (level - 1);
+    double res = DomainRes / scale;
+    double inv_res = 1.0 / res;
+    double X = x * inv_res;
+    double Y = y * inv_res;
+    double Z = z * inv_res;
+    int iX = (int) floor(X);
+    int iY = (int) floor(Y);
+    int iZ = (int) floor(Z);
+    
+    double grid_cell_vol = res * res * res;
+    
+    /* The search window with respect to the top-left-upper corner */
+	int lookLftX = (int) floor((X-iX) - 1.5);
+	int lookRgtX = (int) floor((X-iX) + 1.5);
+	int lookLftY = (int) floor((Y-iY) - 1.5);
+	int lookRgtY = (int) floor((Y-iY) + 1.5);
+	int lookLftZ = (int) floor((Z-iZ) - 1.5);
+	int lookRgtZ = (int) floor((Z-iZ) + 1.5);
+    
+    /* Do the mass assignment */
+	for (int i=lookLftX; i<=lookRgtX; i++) {
+		for (int j=lookLftY; j<=lookRgtY; j++) {
+			for (int k=lookLftZ; k<=lookRgtZ; k++) {
+                double xx = fabs(X - (iX+i));
+                double yy = fabs(Y - (iY+j));
+                double zz = fabs(Z - (iZ+k));
+
+                double part_x = xx < 0.5 ? (0.75-xx*xx)
+                                        : (xx < 1.5 ? 0.5*(1.5-xx)*(1.5-xx) : 0);
+				double part_y = yy < 0.5 ? (0.75-yy*yy)
+                                        : (yy < 1.5 ? 0.5*(1.5-yy)*(1.5-yy) : 0);
+				double part_z = zz < 0.5 ? (0.75-zz*zz)
+                                        : (zz < 1.5 ? 0.5*(1.5-zz)*(1.5-zz) : 0);
+                                        
+                /* Find the cell in the refined grid (if it exists) */
+                struct cell *c;
+                find_top_cell(level, iX+i, iY+j, iZ+k, &c, N, domain);
+                int exists = find_cell(level, iX+i, iY+j, iZ+k, &c);
+                // printf("ere\n");
+                if (exists) {
+                    c->value += value / grid_cell_vol * (part_x*part_y*part_z);
+                    printf("deposited %g at %g %g %g\n", value / grid_cell_vol * (part_x*part_y*part_z), c->x[0], c->x[1], c->x[2]);
+                }
+			}
+		}
+	}
+    
+}
 
 int main() {
     
@@ -249,6 +301,7 @@ int main() {
                 domain[row_major(x, y, z, N)].rel_x[0] = x;
                 domain[row_major(x, y, z, N)].rel_x[1] = y;
                 domain[row_major(x, y, z, N)].rel_x[2] = z;
+                domain[row_major(x, y, z, N)].value = 0.0;
                 
                 printf ("%g %g %g\n", domain[row_major(x, y, z, N)].x[0], domain[row_major(x, y, z, N)].x[1], domain[row_major(x, y, z, N)].x[2]);
             }
@@ -390,7 +443,7 @@ int main() {
     printf("exists? %g %g %g\n", c2->x[0], c2->x[1], c2->x[2]);
     
     
-    double X = 3.0;
+    double X = 7.7;
     double Y = 3.0;
     double Z = 3.0;
     int ix = X / (DomainRes / 2);
@@ -399,12 +452,16 @@ int main() {
     
     struct cell *tc;
     find_top_cell(1, ix, iy, iz, &tc, N, domain);
+    printf("found %g %g %g %d\n", tc->x[0], tc->x[1], tc->x[2], tc->level);
     int found = find_cell(1, ix, iy, iz, &tc);
     
+    printf("found %d %d %d %d\n", found, ix, iy, iz);
     printf("found %d %g %g %g %d\n", found, tc->x[0], tc->x[1], tc->x[2], tc->level);
     
     
-    
+    /* Deposit some particles */
+    double mass = 1.0;
+    deposit_tsc(mass, X, Y, Z, 1, domain, N, DomainRes);
     
     
     
