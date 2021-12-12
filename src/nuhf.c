@@ -618,34 +618,60 @@ int main(int argc, char *argv[]) {
         slab_counter++;
     }
     
-    /* Turn it into an overdensity grid */
-    double avg_density = total_mass / (BoxLen * BoxLen * BoxLen);
-    
-    for (int i=0; i<N*N*N; i++) {
-        domain[i].value = (domain[i].value - avg_density) / avg_density;
-    }
-    
+    /* Turn it into a contiguous grid */
     double *box = malloc(sizeof(double) * N * N * N);
     for (int i=0; i<N*N*N; i++) {
         box[i] = domain[i].value;
     }
-    char coarse_grid_fname[50];
-    sprintf(coarse_grid_fname, "%s", "density_0.hdf5");
-    writeFieldFile(box, N, BoxLen, coarse_grid_fname);
-    message(rank, "Coarse-grained grid exported to '%s'.\n", coarse_grid_fname);
+        
+    /* Reduce the grid */
+    double *box_tot = malloc(sizeof(double) * N * N * N);
+    MPI_Allreduce(box, box_tot, N * N * N, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    
+    /* Re-package into domain struct */
+    for (int i=0; i<N*N*N; i++) {
+        domain[i].value = box_tot[i];
+    }
+    
     free(box);
+    free(box_tot);
+
+    /* Reduce the total mass */
+    double total_mass_global;
+    MPI_Allreduce(&total_mass, &total_mass_global, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    total_mass = total_mass_global;
+        
+    /* Turn it into an overdensity grid */
+    double avg_density = total_mass / (BoxLen * BoxLen * BoxLen);
+        
+    for (int i=0; i<N*N*N; i++) {
+        domain[i].value = (domain[i].value - avg_density) / avg_density;
+    }
     
-    message(rank, "Doing the first refinement.\n");
-    message(rank, "\n");
-    message(rank, "===\n");
-    
+    /* Export the grid on rank 0 */    
+    if (rank == 0) {
+        box = malloc(sizeof(double) * N * N * N);
+        for (int i=0; i<N*N*N; i++) {
+            box[i] = domain[i].value;
+        }
+        char coarse_grid_fname[50];
+        sprintf(coarse_grid_fname, "%s", "density_0.hdf5");
+        writeFieldFile(box, N, BoxLen, coarse_grid_fname);
+        message(rank, "Coarse-grained grid exported to '%s'.\n", coarse_grid_fname);
+        free(box);
+        
+        message(rank, "Doing the first refinement.\n");
+        message(rank, "\n");
+        message(rank, "===\n");
+    }
+        
     const double density_criterion = 200;
     const double density_criterion2 = density_criterion;
     
     int refinement_memory = 10 * N * N * N;
     int refinement_counter = 0;
     struct cell *refinements = calloc(sizeof(struct cell), refinement_memory); 
-    
+
     /* Refine the octree */
     for (int x = 0; x < N; x++) {
         for (int y = 0; y < N; y++) {
@@ -759,6 +785,24 @@ int main(int argc, char *argv[]) {
             slab_counter++;
         }
         
+        /* Turn it into a contiguous grid */
+        box = malloc(sizeof(double) * N * N * N);
+        for (int i=0; i<N*N*N; i++) {
+            box[i] = domain[i].value;
+        }
+            
+        /* Reduce the grid */
+        box_tot = malloc(sizeof(double) * N * N * N);
+        MPI_Allreduce(box, box_tot, N * N * N, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        
+        /* Re-package into domain struct */
+        for (int i=0; i<N*N*N; i++) {
+            domain[i].value = box_tot[i];
+        }
+        
+        free(box);
+        free(box_tot);
+        
         /* Turn it into an overdensity grid */        
         double max_density = 0;
         for (int i = 0; i < refinement_counter; i++) {
@@ -770,28 +814,31 @@ int main(int argc, char *argv[]) {
             }
         }
         message(rank, "Maximum density: %g\n", max_density);
-    
-        long long grid_size = (2 << (level - 1)) * N;
-        if (grid_size < 256) {        
-            box = calloc(sizeof(double), grid_size * grid_size * grid_size);
-            for (int i = 0; i < refinement_counter; i++) {
-                struct cell *c = &refinements[i];
-                if (c->level == level) {
-                    int x = c->x[0] / c->w;
-                    int y = c->x[1] / c->w;
-                    int z = c->x[2] / c->w;
-                    int scale = 2 << (c->level - 1);
-                    int xyz = row_major(x, y, z, N * scale);
-                    box[xyz] = c->value;
+        
+        /* Export the grid on rank 0 if it is not too big */
+        if (rank == 0) {
+            long long grid_size = (2 << (level - 1)) * N;
+            if (grid_size <= 1024) {        
+                box = calloc(sizeof(double), grid_size * grid_size * grid_size);
+                for (int i = 0; i < refinement_counter; i++) {
+                    struct cell *c = &refinements[i];
+                    if (c->level == level) {
+                        int x = c->x[0] / c->w;
+                        int y = c->x[1] / c->w;
+                        int z = c->x[2] / c->w;
+                        int scale = 2 << (c->level - 1);
+                        int xyz = row_major(x, y, z, N * scale);
+                        box[xyz] = c->value;
+                    }
                 }
+                char grid_fname[50];
+                sprintf(grid_fname, "density_%d.hdf5", level);
+                writeFieldFile(box, grid_size, BoxLen, grid_fname);
+                message(rank, "Level %d grid exported to '%s'.\n", level, grid_fname);
+                free(box);    
             }
-            char grid_fname[50];
-            sprintf(grid_fname, "density_%d.hdf5", level);
-            writeFieldFile(box, grid_size, BoxLen, grid_fname);
-            message(rank, "Level %d grid exported to '%s'.\n", level, grid_fname);
-            free(box);    
         }
-    
+        
         message(rank, "Doing level %d refinement (threshold %g).\n", level, density_criterion2 * (2 << (3*(level - 1))));
 
         /* Further refinement? */
@@ -814,268 +861,273 @@ int main(int argc, char *argv[]) {
         if (new_refinements == 0) {
             break;
         }
-        
     }
     
-    message(rank, "\n");
-    message(rank, "The highest level is %d (grid = %d)\n", level, (2 << (level - 1)) * N);
-    message(rank, "\n");
+    if (rank == 0) {
     
-    int total_nr_labels = 0;
-    
-    for (level = 1; level < 6; level++) {
-        message(rank, "Doing a connected component search on level %d.\n", level);
+        message(rank, "\n");
+        message(rank, "The highest level is %d (grid = %d)\n", level, (2 << (level - 1)) * N);
+        message(rank, "\n");
         
-        /* Find the first index of this level */
-        int begin = 0;
-        int end = 0;
-        for (int i = 0; i < refinement_counter; i++) {
-            if (refinements[i].level < level) {
-                begin++;
-            }
-            if (refinements[i].level <= level) {
-                end++;
-            }
-        }
+        int total_nr_labels = 0;
         
-        message(rank, "First index is (%d, %d) %d\n", begin, end, refinement_counter);
-        
-        /* Find isolated regions at this level using Hoshen-Kopelman */
-        int *labels = malloc(sizeof(int) * (end - begin));
-        for (int i = 0; i < end - begin; i++) {
-            labels[i] = i;
-        }
-        
-        /* Set the labels to zero */
-        for (int i = begin; i < end; i++) {
-            struct cell *c = &refinements[i];
-            c->label = 0;
-        }
-        
-        int largest_label = 0;
-        
-        /* Sort the cells at this level by their position in a grid scan */
-        struct pair *positions = malloc(sizeof(struct pair) * (end - begin));
-        for (int i = begin; i < end; i++) {
-            positions[i - begin].idx = i;
-            struct cell *c = &refinements[i];
-            int x = round(c->x[0] / c->w);
-            int y = round(c->x[1] / c->w);
-            int z = round(c->x[2] / c->w);
-            int scale = 2 << (c->level - 1);
-            int xyz = row_major(x, y, z, N * scale);
-            positions[i - begin].xyz = xyz;
-            // printf("%d %d\n", i - begin, xyz);
-        }    
-        
-        /* Sort the indices */
-        qsort(positions, end - begin, sizeof(struct pair), compareByVal);
+        for (level = 1; level < 6; level++) {
+            message(rank, "Doing a connected component search on level %d.\n", level);
             
-        // printf("===\n");
-        // for (int i = begin; i < end; i++) {
-        //     printf("%d %d\n", positions[i - begin].idx, positions[i - begin].xyz);
-        // }
-        // printf("===\n");
-        
-        
-        /* Do a scan at the required level */
-        for (int i = 0; i < end - begin; i++) {
-            struct cell *c = &refinements[positions[i].idx];
-            // printf ("%d %g %g %g\n", c->level, c->x[0], c->x[1], c->x[2]);
-            
-            struct cell *left, *top, *up;
-            int has_left = has_neighbour(c, &left, -1, 0, 0, N, domain);
-            int has_top = has_neighbour(c, &top, 0, -1, 0, N, domain);
-            int has_up = has_neighbour(c, &up, 0, 0, -1, N, domain);
-            
-            if (!has_left && !has_top && !has_up) { /* Neither a label above nor to the left. */
-                largest_label = largest_label + 1; /* Make a new, as-yet-unused cluster label. */
-                c->label = largest_label;
-            } else if (has_left && !has_top && !has_up) { /* One neighbor, to the left. */
-                c->label = find(labels, left->label);
-            } else if (!has_left && has_top && !has_up) { /* One neighbor, above. */
-                c->label = find(labels, top->label);
-            } else if (!has_left && !has_top && has_up) { /* One neighbor, up. */
-                c->label = find(labels, up->label);
-            } else if (has_left && has_top && !has_up) { /* Neighbours left and top */
-                unite(labels, left->label, top->label); /* Link the left and above clusters. */
-                c->label = find(labels, left->label);
-            } else if (has_left && !has_top && has_up) { /* Neighbours left and up */
-                unite(labels, left->label, up->label); /* Link the left and up clusters. */
-                c->label = find(labels, left->label);
-            } else if (!has_left && has_top && has_up) { /* Neighbours top and up */
-                unite(labels, top->label, up->label); /* Link the top and up clusters. */
-                c->label = find(labels, top->label);
-            } else if (has_left && has_top && has_up) { /* Neighbours left, top, and up */
-                unite(labels, left->label, top->label); /* Link the left and top clusters. */
-                unite(labels, left->label, up->label); /* Link the left and up clusters. */
-                c->label = find(labels, left->label);
-            }
-        }
-        
-        
-        
-        // printf("===\n");
-        // 
-        // for (int i = 0; i < end - begin; i++) {
-        //     struct cell *c = &refinements[positions[i].idx];
-        //     // printf ("%g %g %g %d\n", c->x[0] / c->w, c->x[1] / c->w, c->x[2] / c->w, c->label);
-        // }
-        
-        message(rank, "We have %d structures on level %d\n", largest_label, level);
-        
-        /* Update the labels, so that they are globally unique over all levels */
-        for (int i = begin; i < end; i++) {
-            struct cell *c = &refinements[i];
-            c->label += total_nr_labels;
-        }
-        total_nr_labels += largest_label;
-        
-        long long grid_size = (2 << (level - 1)) * N;
-        if (grid_size < 256) {        
-            box = calloc(sizeof(double), grid_size * grid_size * grid_size);
+            /* Find the first index of this level */
+            int begin = 0;
+            int end = 0;
             for (int i = 0; i < refinement_counter; i++) {
-                struct cell *c = &refinements[i];
-                if (c->level == level) {
-                    int x = c->x[0] / c->w;
-                    int y = c->x[1] / c->w;
-                    int z = c->x[2] / c->w;
-                    int scale = 2 << (c->level - 1);
-                    int xyz = row_major(x, y, z, N * scale);
-                    box[xyz] = c->label;
+                if (refinements[i].level < level) {
+                    begin++;
                 }
-            }
-            char grid_fname[50];
-            sprintf(grid_fname, "labels_%d.hdf5", level);
-            writeFieldFile(box, grid_size, BoxLen, grid_fname);
-            message(rank, "Level %d labels grid exported to '%s'.\n", level, grid_fname);
-            free(box);    
-        }
-        
-        free(labels);
-        free(positions);
-        
-        printf("===\n");
-    }
-    
-    /* For each connected structure, compute basic properties */
-    struct component *components = calloc(sizeof(struct component), (total_nr_labels + 1));
-    
-    // for (int i = 1; i < total_nr_labels; i++) {
-    //     components[i].m = 0.0;
-    //     components[i].mx[0] = 0.0;
-    //     components[i].mx[1] = 0.0;
-    //     components[i].mx[2] = 0.0;
-    //     components[i].label = 0;
-    //     components[i].has_child = 0;
-    // }
-    
-    for (int i = 0; i < refinement_counter; i++) {
-        struct cell *c = &refinements[i];
-        struct component *comp = &components[c->label];
-        double mass = avg_density * (1.0 + c->value);
-        comp->m += mass;
-        comp->mx[0] += (c->x[0] + 0.5 * c->w) * mass;
-        comp->mx[1] += (c->x[1] + 0.5 * c->w) * mass;
-        comp->mx[2] += (c->x[2] + 0.5 * c->w) * mass;
-        comp->level = c->level;
-        comp->label = c->label;
-    }
-    
-    /* Compute tentative centre-of-mass */
-    for (int i = 1; i < total_nr_labels; i++) {
-        components[i].x[0] = components[i].mx[0] / components[i].m;
-        components[i].x[1] = components[i].mx[1] / components[i].m;
-        components[i].x[2] = components[i].mx[2] / components[i].m;
-    }
-    
-    message(rank, "\n");
-    
-    /* Determine parent components */
-    message(rank, "Parent relationships\n");
-    for (int i = 1; i < total_nr_labels; i++) {
-        struct component *comp = &components[i];
-        if (comp->level > 1) {
-            for (int j = 0; j < refinement_counter; j++) {
-                struct cell *c = &refinements[j];
-                if (c->label == comp->label) {
-                    comp->parent = &components[c->parent->label];
-                    break;
+                if (refinements[i].level <= level) {
+                    end++;
                 }
-            }
-        
-            message(rank, "%d => %d\n", comp->parent->label, comp->label);
-        }
-    }
-    
-    message(rank, "\n");
-    
-    /* For each component, finds its largest child */
-    message(rank, "Main child relationships\n");
-    for (int i = 1; i < total_nr_labels; i++) {
-        struct component *comp = &components[i];
-        double max_m = 0;
-        int arg_max_m = 0;
-        for (int j = i + 1; j < total_nr_labels; j++) {
-            struct component *comp2 = &components[j];
-            if (comp2->level > 1 && comp2->m > max_m && comp2->parent->label == comp->label) {
-                arg_max_m = comp2->label;
-            }
-        }
-        
-        if (arg_max_m > 0) {
-            comp->largest_child = &components[arg_max_m];
-            comp->has_child = 1;
-            message(rank, "%d <= %d\n", comp->label, arg_max_m);
-        }
-        
-    }
-    
-    message(rank, "\n");
-    
-    /* Now, we can step down */
-    message(rank, "Sub-structure tree\n");
-    for (int i = 1; i < total_nr_labels; i++) {
-        struct component *comp = &components[i];
-        if (comp->has_child) {
-            message(rank, "%d => ", comp->label);
-    
-            struct component *sub = comp;
-            while (sub->has_child) {
-                sub = sub->largest_child;
-                message(rank, "%d => ", sub->label);
             }
             
-            comp->largest_leaf = sub;
-            message(rank, "end.\n");
+            message(rank, "First index is (%d, %d) %d\n", begin, end, refinement_counter);
+            
+            /* Find isolated regions at this level using Hoshen-Kopelman */
+            int *labels = malloc(sizeof(int) * (end - begin));
+            for (int i = 0; i < end - begin; i++) {
+                labels[i] = i;
+            }
+            
+            /* Set the labels to zero */
+            for (int i = begin; i < end; i++) {
+                struct cell *c = &refinements[i];
+                c->label = 0;
+            }
+            
+            int largest_label = 0;
+            
+            /* Sort the cells at this level by their position in a grid scan */
+            struct pair *positions = malloc(sizeof(struct pair) * (end - begin));
+            for (int i = begin; i < end; i++) {
+                positions[i - begin].idx = i;
+                struct cell *c = &refinements[i];
+                int x = round(c->x[0] / c->w);
+                int y = round(c->x[1] / c->w);
+                int z = round(c->x[2] / c->w);
+                int scale = 2 << (c->level - 1);
+                int xyz = row_major(x, y, z, N * scale);
+                positions[i - begin].xyz = xyz;
+                // printf("%d %d\n", i - begin, xyz);
+            }    
+            
+            /* Sort the indices */
+            qsort(positions, end - begin, sizeof(struct pair), compareByVal);
+                
+            // printf("===\n");
+            // for (int i = begin; i < end; i++) {
+            //     printf("%d %d\n", positions[i - begin].idx, positions[i - begin].xyz);
+            // }
+            // printf("===\n");
+            
+            
+            /* Do a scan at the required level */
+            for (int i = 0; i < end - begin; i++) {
+                struct cell *c = &refinements[positions[i].idx];
+                // printf ("%d %g %g %g\n", c->level, c->x[0], c->x[1], c->x[2]);
+                
+                struct cell *left, *top, *up;
+                int has_left = has_neighbour(c, &left, -1, 0, 0, N, domain);
+                int has_top = has_neighbour(c, &top, 0, -1, 0, N, domain);
+                int has_up = has_neighbour(c, &up, 0, 0, -1, N, domain);
+                
+                if (!has_left && !has_top && !has_up) { /* Neither a label above nor to the left. */
+                    largest_label = largest_label + 1; /* Make a new, as-yet-unused cluster label. */
+                    c->label = largest_label;
+                } else if (has_left && !has_top && !has_up) { /* One neighbor, to the left. */
+                    c->label = find(labels, left->label);
+                } else if (!has_left && has_top && !has_up) { /* One neighbor, above. */
+                    c->label = find(labels, top->label);
+                } else if (!has_left && !has_top && has_up) { /* One neighbor, up. */
+                    c->label = find(labels, up->label);
+                } else if (has_left && has_top && !has_up) { /* Neighbours left and top */
+                    unite(labels, left->label, top->label); /* Link the left and above clusters. */
+                    c->label = find(labels, left->label);
+                } else if (has_left && !has_top && has_up) { /* Neighbours left and up */
+                    unite(labels, left->label, up->label); /* Link the left and up clusters. */
+                    c->label = find(labels, left->label);
+                } else if (!has_left && has_top && has_up) { /* Neighbours top and up */
+                    unite(labels, top->label, up->label); /* Link the top and up clusters. */
+                    c->label = find(labels, top->label);
+                } else if (has_left && has_top && has_up) { /* Neighbours left, top, and up */
+                    unite(labels, left->label, top->label); /* Link the left and top clusters. */
+                    unite(labels, left->label, up->label); /* Link the left and up clusters. */
+                    c->label = find(labels, left->label);
+                }
+            }
+            
+            
+            
+            // printf("===\n");
+            // 
+            // for (int i = 0; i < end - begin; i++) {
+            //     struct cell *c = &refinements[positions[i].idx];
+            //     // printf ("%g %g %g %d\n", c->x[0] / c->w, c->x[1] / c->w, c->x[2] / c->w, c->label);
+            // }
+            
+            message(rank, "We have %d structures on level %d\n", largest_label, level);
+            
+            /* Update the labels, so that they are globally unique over all levels */
+            for (int i = begin; i < end; i++) {
+                struct cell *c = &refinements[i];
+                c->label += total_nr_labels;
+            }
+            total_nr_labels += largest_label;
+            
+            long long grid_size = (2 << (level - 1)) * N;
+            if (grid_size < 256) {        
+                box = calloc(sizeof(double), grid_size * grid_size * grid_size);
+                for (int i = 0; i < refinement_counter; i++) {
+                    struct cell *c = &refinements[i];
+                    if (c->level == level) {
+                        int x = c->x[0] / c->w;
+                        int y = c->x[1] / c->w;
+                        int z = c->x[2] / c->w;
+                        int scale = 2 << (c->level - 1);
+                        int xyz = row_major(x, y, z, N * scale);
+                        box[xyz] = c->label;
+                    }
+                }
+                char grid_fname[50];
+                sprintf(grid_fname, "labels_%d.hdf5", level);
+                writeFieldFile(box, grid_size, BoxLen, grid_fname);
+                message(rank, "Level %d labels grid exported to '%s'.\n", level, grid_fname);
+                free(box);    
+            }
+            
+            free(labels);
+            free(positions);
+            
+            printf("===\n");
         }
-    }
-    
-    message(rank, "\n");
-    
-    // /* Now, we can step down */
-    // for (int i = 1; i < total_nr_labels; i++) {
-    //     struct component *comp = &components[i];
-    //     if (comp->level == 1) {
-    //         message(rank, "%d => ", comp->label);
-    // 
-    //         struct component *sub = comp;
-    //         while (sub->has_child) {
-    //             sub = sub->largest_child;
-    //             message(rank, "%d => ", sub->label);
-    //         }
-    //         message(rank, "end.\n");
-    //     }
-    // }
-    
-    /* Find the leafs of the tree, which correspond to (sub)-halos */
-    message(rank, "#ID M X Y Z parent refinement_lvl\n");
-    for (int i = 1; i < total_nr_labels; i++) {
-        struct component *comp = &components[i];
-        if (!comp->has_child) {
-            int host_label = comp->parent->largest_leaf->label;
-            message(rank, "%d %g %g %g %g %d %d\n", i, comp->m, comp->x[0], comp->x[1], comp->x[2], host_label, comp->level);
+        
+        /* For each connected structure, compute basic properties */
+        struct component *components = calloc(sizeof(struct component), (total_nr_labels + 1));
+        
+        // for (int i = 1; i < total_nr_labels; i++) {
+        //     components[i].m = 0.0;
+        //     components[i].mx[0] = 0.0;
+        //     components[i].mx[1] = 0.0;
+        //     components[i].mx[2] = 0.0;
+        //     components[i].label = 0;
+        //     components[i].has_child = 0;
+        // }
+        
+        for (int i = 0; i < refinement_counter; i++) {
+            struct cell *c = &refinements[i];
+            struct component *comp = &components[c->label];
+            double mass = avg_density * (1.0 + c->value);
+            comp->m += mass;
+            comp->mx[0] += (c->x[0] + 0.5 * c->w) * mass;
+            comp->mx[1] += (c->x[1] + 0.5 * c->w) * mass;
+            comp->mx[2] += (c->x[2] + 0.5 * c->w) * mass;
+            comp->level = c->level;
+            comp->label = c->label;
         }
+        
+        /* Compute tentative centre-of-mass */
+        for (int i = 1; i < total_nr_labels; i++) {
+            components[i].x[0] = components[i].mx[0] / components[i].m;
+            components[i].x[1] = components[i].mx[1] / components[i].m;
+            components[i].x[2] = components[i].mx[2] / components[i].m;
+        }
+        
+        message(rank, "\n");
+        
+        /* Determine parent components */
+        message(rank, "Parent relationships\n");
+        for (int i = 1; i < total_nr_labels; i++) {
+            struct component *comp = &components[i];
+            if (comp->level > 1) {
+                for (int j = 0; j < refinement_counter; j++) {
+                    struct cell *c = &refinements[j];
+                    if (c->label == comp->label) {
+                        comp->parent = &components[c->parent->label];
+                        break;
+                    }
+                }
+            
+                message(rank, "%d => %d\n", comp->parent->label, comp->label);
+            }
+        }
+        
+        message(rank, "\n");
+        
+        /* For each component, finds its largest child */
+        message(rank, "Main child relationships\n");
+        for (int i = 1; i < total_nr_labels; i++) {
+            struct component *comp = &components[i];
+            double max_m = 0;
+            int arg_max_m = 0;
+            for (int j = i + 1; j < total_nr_labels; j++) {
+                struct component *comp2 = &components[j];
+                if (comp2->level > 1 && comp2->m > max_m && comp2->parent->label == comp->label) {
+                    arg_max_m = comp2->label;
+                }
+            }
+            
+            if (arg_max_m > 0) {
+                comp->largest_child = &components[arg_max_m];
+                comp->has_child = 1;
+                message(rank, "%d <= %d\n", comp->label, arg_max_m);
+            }
+            
+        }
+        
+        message(rank, "\n");
+        
+        /* Now, we can step down */
+        message(rank, "Sub-structure tree\n");
+        for (int i = 1; i < total_nr_labels; i++) {
+            struct component *comp = &components[i];
+            if (comp->has_child) {
+                message(rank, "%d => ", comp->label);
+        
+                struct component *sub = comp;
+                while (sub->has_child) {
+                    sub = sub->largest_child;
+                    message(rank, "%d => ", sub->label);
+                }
+                
+                comp->largest_leaf = sub;
+                message(rank, "end.\n");
+            }
+        }
+        
+        message(rank, "\n");
+        
+        // /* Now, we can step down */
+        // for (int i = 1; i < total_nr_labels; i++) {
+        //     struct component *comp = &components[i];
+        //     if (comp->level == 1) {
+        //         message(rank, "%d => ", comp->label);
+        // 
+        //         struct component *sub = comp;
+        //         while (sub->has_child) {
+        //             sub = sub->largest_child;
+        //             message(rank, "%d => ", sub->label);
+        //         }
+        //         message(rank, "end.\n");
+        //     }
+        // }
+        
+        /* Find the leafs of the tree, which correspond to (sub)-halos */
+        message(rank, "#ID M X Y Z parent refinement_lvl\n");
+        for (int i = 1; i < total_nr_labels; i++) {
+            struct component *comp = &components[i];
+            if (!comp->has_child) {
+                int host_label = comp->parent->largest_leaf->label;
+                message(rank, "%d %g %g %g %g %d %d\n", i, comp->m, comp->x[0], comp->x[1], comp->x[2], host_label, comp->level);
+            }
+        }
+        
+        
+        free(components);
     }
     
     
@@ -1195,7 +1247,6 @@ int main(int argc, char *argv[]) {
     
     
     
-    free(components);
     
     // {
     //     int level = 4;
