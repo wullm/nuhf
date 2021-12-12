@@ -338,10 +338,7 @@ int main(int argc, char *argv[]) {
         return 0;
     }
     
-    printf("%d %d\n", row_major(20, 285, 312, 480), row_major(20, 284, 312, 480));
-    
     printf("nuHF halo finder\n");
-    // exit(1);
     
     /* Initialize MPI for distributed memory parallelization */
     MPI_Init(&argc, &argv);
@@ -457,8 +454,6 @@ int main(int argc, char *argv[]) {
 
     message(rank, "\n");
         
-    printf("The GridSize is %d\n", pars.GridSize);
-    
     const int N = pars.GridSize;
     const double DomainRes = BoxLen / N;
     struct cell *domain = calloc(sizeof(struct cell), N * N * N);
@@ -626,6 +621,8 @@ int main(int argc, char *argv[]) {
     free(box);
     
     message(rank, "Doing the first refinement.\n");
+    message(rank, "\n");
+    message(rank, "===\n");
     
     const double density_criterion = 200;
     const double density_criterion2 = density_criterion;
@@ -798,13 +795,16 @@ int main(int argc, char *argv[]) {
         }
         
         message(rank, "New refinements: %lld\n", new_refinements);
+        message(rank, "===\n");
         if (new_refinements == 0) {
             break;
         }
+        
     }
     
-    message(rank, "The highest level is %d (N = %d)\n", level, (2 << (level - 1)) * N);
-    
+    message(rank, "\n");
+    message(rank, "The highest level is %d (grid = %d)\n", level, (2 << (level - 1)) * N);
+    message(rank, "\n");
     
     for (level = 1; level < 6; level++) {
         message(rank, "Doing a connected component search on level %d.\n", level);
@@ -896,37 +896,43 @@ int main(int argc, char *argv[]) {
             }
         }
         
-        printf("===\n");
+        // printf("===\n");
+        // 
+        // for (int i = 0; i < end - begin; i++) {
+        //     struct cell *c = &refinements[positions[i].idx];
+        //     // printf ("%g %g %g %d\n", c->x[0] / c->w, c->x[1] / c->w, c->x[2] / c->w, c->label);
+        // }
         
-        for (int i = 0; i < end - begin; i++) {
-            struct cell *c = &refinements[positions[i].idx];
-            printf ("%g %g %g %d\n", c->x[0] / c->w, c->x[1] / c->w, c->x[2] / c->w, c->label);
+        message(rank, "We have %d structures on level %d\n", largest_label, level);
+        
+        long long grid_size = (2 << (level - 1)) * N;
+        if (grid_size < 256) {        
+            box = calloc(sizeof(double), grid_size * grid_size * grid_size);
+            for (int i = 0; i < refinement_counter; i++) {
+                struct cell *c = &refinements[i];
+                if (c->level == level) {
+                    int x = c->x[0] / c->w;
+                    int y = c->x[1] / c->w;
+                    int z = c->x[2] / c->w;
+                    int scale = 2 << (c->level - 1);
+                    int xyz = row_major(x, y, z, N * scale);
+                    box[xyz] = c->label;
+                }
+            }
+            char grid_fname[50];
+            sprintf(grid_fname, "labels_%d.hdf5", level);
+            writeFieldFile(box, grid_size, BoxLen, grid_fname);
+            message(rank, "Level %d labels grid exported to '%s'.\n", level, grid_fname);
+            free(box);    
         }
         
         free(labels);
         free(positions);
+        
+        printf("===\n");
     }
     
-    // long long grid_size = (2 << (level - 1)) * N;
-    // if (grid_size < 512) {        
-    //     box = calloc(sizeof(double), grid_size * grid_size * grid_size);
-    //     for (int i = 0; i < refinement_counter; i++) {
-    //         struct cell *c = &refinements[i];
-    //         if (c->level == level) {
-    //             int x = c->x[0] / c->w;
-    //             int y = c->x[1] / c->w;
-    //             int z = c->x[2] / c->w;
-    //             int scale = 2 << (c->level - 1);
-    //             int xyz = row_major(x, y, z, N * scale);
-    //             box[xyz] = c->label;
-    //         }
-    //     }
-    //     char grid_fname[50];
-    //     sprintf(grid_fname, "labels_%d.hdf5", level);
-    //     writeFieldFile(box, grid_size, BoxLen, grid_fname);
-    //     message(rank, "Level %d grid exported to '%s'.\n", level, grid_fname);
-    //     free(box);    
-    // }
+    
     
     
     exit(1);
