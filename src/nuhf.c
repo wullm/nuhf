@@ -639,10 +639,10 @@ int main(int argc, char *argv[]) {
     /* Reduce the total mass */
     double total_mass_global;
     MPI_Allreduce(&total_mass, &total_mass_global, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    total_mass = total_mass_global;
+    // total_mass = total_mass_global;
         
     /* Turn it into an overdensity grid */
-    double avg_density = total_mass / (BoxLen * BoxLen * BoxLen);
+    double avg_density = total_mass_global / (BoxLen * BoxLen * BoxLen);
         
     for (int i=0; i<N*N*N; i++) {
         domain[i].value = (domain[i].value - avg_density) / avg_density;
@@ -665,7 +665,7 @@ int main(int argc, char *argv[]) {
         message(rank, "===\n");
     }
         
-    const double density_criterion = 200;
+    const double density_criterion = 5;
     const double density_criterion2 = density_criterion;
     
     int refinement_memory = 10 * N * N * N;
@@ -786,18 +786,18 @@ int main(int argc, char *argv[]) {
         }
         
         /* Turn it into a contiguous grid */
-        box = malloc(sizeof(double) * N * N * N);
-        for (int i=0; i<N*N*N; i++) {
-            box[i] = domain[i].value;
+        box = malloc(sizeof(double) * refinement_counter);
+        for (int i=0; i<refinement_counter; i++) {
+            box[i] = refinements[i].value;
         }
             
         /* Reduce the grid */
-        box_tot = malloc(sizeof(double) * N * N * N);
-        MPI_Allreduce(box, box_tot, N * N * N, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        box_tot = malloc(sizeof(double) * refinement_counter);
+        MPI_Allreduce(box, box_tot, refinement_counter, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
         
         /* Re-package into domain struct */
-        for (int i=0; i<N*N*N; i++) {
-            domain[i].value = box_tot[i];
+        for (int i=0; i<refinement_counter; i++) {
+            refinements[i].value = box_tot[i];
         }
         
         free(box);
@@ -818,7 +818,7 @@ int main(int argc, char *argv[]) {
         /* Export the grid on rank 0 if it is not too big */
         if (rank == 0) {
             long long grid_size = (2 << (level - 1)) * N;
-            if (grid_size <= 1024) {        
+            if (grid_size <= 1024) {
                 box = calloc(sizeof(double), grid_size * grid_size * grid_size);
                 for (int i = 0; i < refinement_counter; i++) {
                     struct cell *c = &refinements[i];
