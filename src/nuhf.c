@@ -338,7 +338,10 @@ int main(int argc, char *argv[]) {
         return 0;
     }
     
+    printf("%d %d\n", row_major(20, 285, 312, 480), row_major(20, 284, 312, 480));
+    
     printf("nuHF halo finder\n");
+    // exit(1);
     
     /* Initialize MPI for distributed memory parallelization */
     MPI_Init(&argc, &argv);
@@ -646,8 +649,9 @@ int main(int argc, char *argv[]) {
         }
     }
     
+    int level;
     
-    for (int level = 1; level < 6; level++) {
+    for (level = 1; level < 6; level++) {
         message(rank, "Re-computing density on level %d.\n", level);
     
         /* Do mass assignment on the refined level */
@@ -799,100 +803,133 @@ int main(int argc, char *argv[]) {
         }
     }
     
+    message(rank, "The highest level is %d (N = %d)\n", level, (2 << (level - 1)) * N);
+    
+    
+    for (level = 1; level < 6; level++) {
+        message(rank, "Doing a connected component search on level %d.\n", level);
+        
+        /* Find the first index of this level */
+        int begin = 0;
+        int end = 0;
+        for (int i = 0; i < refinement_counter; i++) {
+            if (refinements[i].level < level) {
+                begin++;
+            }
+            if (refinements[i].level <= level) {
+                end++;
+            }
+        }
+        
+        message(rank, "First index is (%d, %d) %d\n", begin, end, refinement_counter);
+        
+        /* Find isolated regions at this level using Hoshen-Kopelman */
+        int *labels = malloc(sizeof(int) * (end - begin));
+        for (int i = 0; i < end - begin; i++) {
+            labels[i] = i;
+        }
+        
+        /* Set the labels to zero */
+        for (int i = begin; i < end; i++) {
+            struct cell *c = &refinements[i];
+            c->label = 0;
+        }
+        
+        int largest_label = 0;
+        
+        /* Sort the cells at this level by their position in a grid scan */
+        struct pair *positions = malloc(sizeof(struct pair) * (end - begin));
+        for (int i = begin; i < end; i++) {
+            positions[i - begin].idx = i;
+            struct cell *c = &refinements[i];
+            int x = round(c->x[0] / c->w);
+            int y = round(c->x[1] / c->w);
+            int z = round(c->x[2] / c->w);
+            int scale = 2 << (c->level - 1);
+            int xyz = row_major(x, y, z, N * scale);
+            positions[i - begin].xyz = xyz;
+            // printf("%d %d\n", i - begin, xyz);
+        }    
+        
+        /* Sort the indices */
+        qsort(positions, end - begin, sizeof(struct pair), compareByVal);
+            
+        // printf("===\n");
+        // for (int i = begin; i < end; i++) {
+        //     printf("%d %d\n", positions[i - begin].idx, positions[i - begin].xyz);
+        // }
+        // printf("===\n");
+        
+        
+        /* Do a scan at the required level */
+        for (int i = 0; i < end - begin; i++) {
+            struct cell *c = &refinements[positions[i].idx];
+            // printf ("%d %g %g %g\n", c->level, c->x[0], c->x[1], c->x[2]);
+            
+            struct cell *left, *top, *up;
+            int has_left = has_neighbour(c, &left, -1, 0, 0, N, domain);
+            int has_top = has_neighbour(c, &top, 0, -1, 0, N, domain);
+            int has_up = has_neighbour(c, &up, 0, 0, -1, N, domain);
+            
+            if (!has_left && !has_top && !has_up) { /* Neither a label above nor to the left. */
+                largest_label = largest_label + 1; /* Make a new, as-yet-unused cluster label. */
+                c->label = largest_label;
+            } else if (has_left && !has_top && !has_up) { /* One neighbor, to the left. */
+                c->label = find(labels, left->label);
+            } else if (!has_left && has_top && !has_up) { /* One neighbor, above. */
+                c->label = find(labels, top->label);
+            } else if (!has_left && !has_top && has_up) { /* One neighbor, up. */
+                c->label = find(labels, up->label);
+            } else if (has_left && has_top && !has_up) { /* Neighbours left and top */
+                unite(labels, left->label, top->label); /* Link the left and above clusters. */
+                c->label = find(labels, left->label);
+            } else if (has_left && !has_top && has_up) { /* Neighbours left and up */
+                unite(labels, left->label, up->label); /* Link the left and up clusters. */
+                c->label = find(labels, left->label);
+            } else if (!has_left && has_top && has_up) { /* Neighbours top and up */
+                unite(labels, top->label, up->label); /* Link the top and up clusters. */
+                c->label = find(labels, top->label);
+            } else if (has_left && has_top && has_up) { /* Neighbours left, top, and up */
+                unite(labels, left->label, top->label); /* Link the left and top clusters. */
+                unite(labels, left->label, up->label); /* Link the left and up clusters. */
+                c->label = find(labels, left->label);
+            }
+        }
+        
+        printf("===\n");
+        
+        for (int i = 0; i < end - begin; i++) {
+            struct cell *c = &refinements[positions[i].idx];
+            printf ("%g %g %g %d\n", c->x[0] / c->w, c->x[1] / c->w, c->x[2] / c->w, c->label);
+        }
+        
+        free(labels);
+        free(positions);
+    }
+    
+    // long long grid_size = (2 << (level - 1)) * N;
+    // if (grid_size < 512) {        
+    //     box = calloc(sizeof(double), grid_size * grid_size * grid_size);
+    //     for (int i = 0; i < refinement_counter; i++) {
+    //         struct cell *c = &refinements[i];
+    //         if (c->level == level) {
+    //             int x = c->x[0] / c->w;
+    //             int y = c->x[1] / c->w;
+    //             int z = c->x[2] / c->w;
+    //             int scale = 2 << (c->level - 1);
+    //             int xyz = row_major(x, y, z, N * scale);
+    //             box[xyz] = c->label;
+    //         }
+    //     }
+    //     char grid_fname[50];
+    //     sprintf(grid_fname, "labels_%d.hdf5", level);
+    //     writeFieldFile(box, grid_size, BoxLen, grid_fname);
+    //     message(rank, "Level %d grid exported to '%s'.\n", level, grid_fname);
+    //     free(box);    
+    // }
     
     
     exit(1);
-    
-    
-    int max_level = 1;
-    
-    /* Find isolated regions at a specific level using Hoshen-Kopelman */
-    int begin = 0;
-    int end = refinement_counter;
-        
-    int *labels = malloc(sizeof(int) * (end - begin));
-    for (int i = 0; i < end - begin; i++) {
-        labels[i] = i;
-    }
-    
-    /* Set the labels to zero */
-    for (int i = begin; i < end; i++) {
-        struct cell *c = &refinements[i];
-        c->label = 0;
-    }
-    
-    int largest_label = 0;
-    
-    /* Sort the cells at this level by their position in a grid scan */
-    struct pair *positions = malloc(sizeof(struct pair) * (end - begin));
-    for (int i = begin; i < end; i++) {
-        positions[i - begin].idx = i - begin;
-        struct cell *c = &refinements[i];
-        int x = c->x[0] / c->w;
-        int y = c->x[1] / c->w;
-        int z = c->x[2] / c->w;
-        int level = c->level;
-        int scale = 2 << (level - 1);
-        int xyz = row_major(x, y, z, N * scale);
-        positions[i - begin].xyz = xyz;
-        printf("%d %d\n", i - begin, xyz);
-    }    
-    
-    /* Sort the indices */
-    qsort(positions, end - begin, sizeof(struct pair), compareByVal);
-        
-    printf("===\n");
-    for (int i = begin; i < end; i++) {
-        printf("%d %d\n", positions[i - begin].idx, positions[i - begin].xyz);
-    }
-    printf("===\n");
-    
-    
-    /* Do a scan at the required level */
-    for (int i = 0; i < end - begin; i++) {
-        struct cell *c = &refinements[positions[i].idx];
-        printf ("%g %g %g\n", c->x[0], c->x[1], c->x[2]);
-        
-        
-        
-        struct cell *left, *top, *up;
-        int has_left = has_neighbour(c, &left, -1, 0, 0, N, domain);
-        int has_top = has_neighbour(c, &top, 0, -1, 0, N, domain);
-        int has_up = has_neighbour(c, &up, 0, 0, -1, N, domain);
-        
-        // printf("n: %d %d %d\n", has_left, has_top, has_up);
-        
-        if (!has_left && !has_top && !has_up) { /* Neither a label above nor to the left. */
-            largest_label = largest_label + 1; /* Make a new, as-yet-unused cluster label. */
-            c->label = largest_label;
-        } else if (has_left && !has_top && !has_up) { /* One neighbor, to the left. */
-            c->label = find(labels, left->label);
-        } else if (!has_left && has_top && !has_up) { /* One neighbor, above. */
-            c->label = find(labels, top->label);
-        } else if (!has_left && !has_top && has_up) { /* One neighbor, up. */
-            c->label = find(labels, up->label);
-        } else if (has_left && has_top && !has_up) { /* Neighbours left and top */
-            unite(labels, left->label, top->label); /* Link the left and above clusters. */
-            c->label = find(labels, left->label);
-        } else if (has_left && !has_top && has_up) { /* Neighbours left and up */
-            unite(labels, left->label, up->label); /* Link the left and up clusters. */
-            c->label = find(labels, left->label);
-        } else if (!has_left && has_top && has_up) { /* Neighbours top and up */
-            unite(labels, top->label, up->label); /* Link the top and up clusters. */
-            c->label = find(labels, top->label);
-        } else if (has_left && has_top && has_up) { /* Neighbours left, top, and up */
-            unite(labels, left->label, top->label); /* Link the left and top clusters. */
-            unite(labels, left->label, up->label); /* Link the left and up clusters. */
-            c->label = find(labels, left->label);
-        }
-    }
-    
-    printf("===\n");
-    
-    for (int i = 0; i < end - begin; i++) {
-        struct cell *c = &refinements[positions[i].idx];
-        printf ("%g %g %g %d\n", c->x[0] / c->w, c->x[1] / c->w, c->x[2] / c->w, c->label);
-    }
     
     
     /* Can we do neighbour finding? */
